@@ -1,5 +1,0 @@
-激活虚拟环境：venv\Scripts\activate
-
-测试：python -m src.qa_chain
-
-运行程序：streamlit run app.py
