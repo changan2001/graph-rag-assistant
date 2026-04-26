@@ -1,6 +1,6 @@
-# 🧠 基于图谱增强的化学文献问答系统 (GraphRAG Assistant)
+# 🧠 基于图谱增强的问答助手 (GraphRAG Assistant)
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](你的Streamlit部署链接填在这里)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://graph-rag-assistant.streamlit.app)
 
 这是一个融合了**向量检索 (FAISS)** 与**知识图谱 (Neo4j)** 的新一代多模态文档对话助手。本项目旨在解决传统 RAG（检索增强生成）在处理复杂逻辑推理和深层实体关联时表现不足（容易丢失全局上下文）的问题，特别适用于化学文献、技术手册等高密度知识场景。
 
