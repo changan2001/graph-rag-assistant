@@ -1,4 +1,4 @@
-# 🧠 图谱增强问答助手 (GraphRAG Assistant)
+# 🧠 GraphRAG 智能文档助手
 ## 全称：基于知识图谱增强的智能问答系统
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://graph-rag-assistant.streamlit.app)
