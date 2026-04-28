@@ -229,7 +229,7 @@ with tab_chat:
     # 初始化会话状态中的聊天历史
     if "messages" not in st.session_state:
         st.session_state.messages = [
-            {"role": "assistant", "content": "你好，长安！我是你的 GraphRAG 助手。我已经准备好解答关于上传文档的任何问题了。"}
+            {"role": "assistant", "content": "你好！我是你的 GraphRAG 助手。我已经准备好解答关于上传文档的任何问题了。"}
         ]
 
     # 展示历史消息
