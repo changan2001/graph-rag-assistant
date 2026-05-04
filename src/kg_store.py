@@ -4,7 +4,7 @@ Neo4j 知识图谱存储模块（最终安全版）
 功能：
     1. 连接云端 Neo4j Aura 图数据库
     2. 将抽取出的三元组数据安全写入图数据库
-    3. 支持图谱查询和清空操作
+    3. 增加写入前的数据结构二次校验，防止脏数据注入
 """
 
 import re
@@ -15,17 +15,8 @@ import config
 def sanitize_relation_type(relation: str) -> str:
     """
     清理关系类型名称，确保它可以安全用作Cypher关系类型
-
-    Neo4j的关系类型只允许字母、数字、下划线
-    其他字符统一替换为下划线
-
-    参数:
-        relation: 原始关系类型名称
-
-    返回:
-        清理后的安全关系类型名称
     """
-    if not relation:
+    if not relation or not isinstance(relation, str):
         return "关联"
     # 只保留中文字符、英文字母、数字和下划线
     cleaned = re.sub(r"[^\w\u4e00-\u9fff]", "_", relation)
@@ -40,9 +31,7 @@ class KGStore:
     """
 
     def __init__(self):
-        """
-        初始化数据库连接
-        """
+        """初始化数据库连接"""
         try:
             self.driver = GraphDatabase.driver(
                 config.NEO4J_URI,
@@ -70,10 +59,7 @@ class KGStore:
 
     def add_triplets(self, triplets: list[dict]):
         """
-        将三元组列表写入图数据库
-
-        参数:
-            triplets: 包含实体和关系的字典列表
+        将三元组列表写入图数据库（带严格类型校验）
         """
         if not self.driver or not triplets:
             return
@@ -81,14 +67,22 @@ class KGStore:
         success_count = 0
         with self.driver.session() as session:
             for triplet in triplets:
+                # 防御性编程：确保传入的 triplet 是字典
+                if not isinstance(triplet, dict):
+                    continue
+
                 head = triplet.get("head", {})
                 tail = triplet.get("tail", {})
                 relation = triplet.get("relation", "关联")
 
-                head_name = head.get("name", "").strip()
-                head_label = head.get("label", "Entity").strip()
-                tail_name = tail.get("name", "").strip()
-                tail_label = tail.get("label", "Entity").strip()
+                # 防御性编程：确保 head 和 tail 也是字典
+                if not isinstance(head, dict) or not isinstance(tail, dict):
+                    continue
+
+                head_name = str(head.get("name", "")).strip()
+                head_label = str(head.get("label", "Entity")).strip()
+                tail_name = str(tail.get("name", "")).strip()
+                tail_label = str(tail.get("label", "Entity")).strip()
 
                 if not head_name or not tail_name:
                     continue
@@ -96,7 +90,7 @@ class KGStore:
                 # 清理标签和关系类型中的特殊字符
                 head_label = sanitize_relation_type(head_label)
                 tail_label = sanitize_relation_type(tail_label)
-                safe_relation = sanitize_relation_type(relation)
+                safe_relation = sanitize_relation_type(str(relation))
 
                 # 使用反引号包裹动态标签和关系类型，确保Cypher语法安全
                 cypher = f"""
@@ -114,16 +108,7 @@ class KGStore:
         print(f"成功将处理好的 {success_count} 个关系写入 Neo4j 数据库。")
 
     def query_by_entity(self, entity_name: str, max_relations: int = None) -> list[dict]:
-        """
-        根据实体名称查询相关的关系
-
-        参数:
-            entity_name: 要查询的实体名称
-            max_relations: 返回的最大关系数量
-
-        返回:
-            关系列表，每个元素包含 source, relation, target
-        """
+        """根据实体名称查询相关的关系"""
         if not self.driver or not entity_name:
             return []
 
@@ -152,12 +137,7 @@ class KGStore:
         return results_list
 
     def get_all_nodes(self) -> list[dict]:
-        """
-        获取图谱中的所有节点（用于可视化）
-
-        返回:
-            节点列表
-        """
+        """获取图谱中的所有节点（用于可视化）"""
         if not self.driver:
             return []
 
@@ -168,7 +148,7 @@ class KGStore:
                 for record in results:
                     nodes.append({
                         "name": record["name"],
-                        "label": record["labels"][0] if record["labels"] else "Entity",
+                        "label": record["labels"] if record["labels"] else "Entity",
                     })
             except Exception as e:
                 print(f"获取节点出错: {e}")
@@ -176,12 +156,7 @@ class KGStore:
         return nodes
 
     def get_all_edges(self) -> list[dict]:
-        """
-        获取图谱中的所有边/关系（用于可视化）
-
-        返回:
-            边列表
-        """
+        """获取图谱中的所有边/关系（用于可视化）"""
         if not self.driver:
             return []
 
