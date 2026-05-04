@@ -1,9 +1,12 @@
 """
-LLM（大语言模型）调用模块（最终加固版）
+LLM（大语言模型）调用模块（流式传输 + max_tokens 修复版）
 
 功能：
     提供统一的接口来调用各种兼容OpenAI格式的大模型API
     内置JSON清洗器，能处理大模型返回的各种"不规矩"格式
+    支持剥离推理模型的 <think> 思维链标签
+    失败时返回 None 而非空JSON，让调用方能精确判断故障
+    新增流式传输方法，用于前端打字机效果
 """
 
 import json
@@ -20,6 +23,7 @@ def clean_json_response(text: str) -> str:
         {"key": "value"}
         ```
     或者在JSON前后加上多余的解释文字。
+    推理模型还会在前面加上 <think>思考过程</think> 标签。
     这个函数会把所有这些"外衣"脱掉，只保留纯净的JSON字符串。
 
     参数:
@@ -29,9 +33,12 @@ def clean_json_response(text: str) -> str:
         清洗后的纯JSON字符串
     """
     if not text:
-        return "{}"
+        return ""
 
     cleaned = text.strip()
+
+    # 策略0：剥离推理模型的 <think>...</think> 思维链标签
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", cleaned, flags=re.IGNORECASE).strip()
 
     # 策略1：用正则表达式匹配 ```json ... ``` 或 ``` ... ``` 中间的内容
     code_block_pattern = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
@@ -87,14 +94,14 @@ class LLMClient:
 
     def chat(self, user_message: str, system_prompt: str = None) -> str:
         """
-        发送消息给LLM并获取回复
+        发送消息给LLM并获取完整回复（非流式，用于内部调用）
 
         参数:
             user_message: 用户的消息/问题
             system_prompt: 系统提示词（可选）
 
         返回:
-            LLM的回复文本
+            LLM的完整回复文本
         """
         messages = []
 
@@ -108,6 +115,7 @@ class LLMClient:
                 model=self.model_name,
                 messages=messages,
                 temperature=0.7,
+                max_tokens=4096,
             )
             reply = response.choices[0].message.content
             return reply
@@ -117,9 +125,48 @@ class LLMClient:
             print(error_msg)
             return error_msg
 
-    def chat_with_json_output(self, user_message: str, system_prompt: str = None) -> str:
+    def chat_stream(self, user_message: str, system_prompt: str = None):
         """
-        发送消息并要求LLM返回JSON格式的回复
+        流式传输：发送消息给LLM，逐token返回回复（生成器）
+
+        用于前端聊天界面的打字机效果。
+        配合 Streamlit 的 st.write_stream() 使用。
+
+        参数:
+            user_message: 用户的消息/问题
+            system_prompt: 系统提示词（可选）
+
+        返回:
+            一个生成器（generator），每次 yield 一小段文本
+        """
+        messages = []
+
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        messages.append({"role": "user", "content": user_message})
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=4096,
+                stream=True,
+            )
+
+            for chunk in response:
+                # 每个 chunk 包含一小段新生成的文本
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+
+        except Exception as e:
+            # 流式传输中出错，把错误信息也 yield 出去，前端能看到
+            yield f"\n\n⚠️ 流式传输出错: {str(e)}"
+
+    def chat_with_json_output(self, user_message: str, system_prompt: str = None) -> str | None:
+        """
+        发送消息并要求LLM返回JSON格式的回复（非流式）
         内置三重保障机制确保输出合法JSON
 
         参数:
@@ -127,7 +174,8 @@ class LLMClient:
             system_prompt: 系统提示词（可选）
 
         返回:
-            清洗后的JSON字符串
+            成功时返回清洗后的合法JSON字符串
+            失败时返回 None（让调用方能明确区分"API故障"和"确实无数据"）
         """
         messages = []
 
@@ -144,6 +192,7 @@ class LLMClient:
                 model=self.model_name,
                 messages=messages,
                 temperature=0.1,
+                max_tokens=4096,
                 response_format={"type": "json_object"},
             )
             raw_response = response.choices[0].message.content
@@ -160,11 +209,12 @@ class LLMClient:
                     model=self.model_name,
                     messages=messages_fallback,
                     temperature=0.1,
+                    max_tokens=4096,
                 )
                 raw_response = response.choices[0].message.content
             except Exception as e:
                 print(f"调用LLM API时出错: {str(e)}")
-                return "{}"
+                return None
 
         # 无论哪种方式拿到的结果，都过一遍清洗器
         cleaned = clean_json_response(raw_response)
@@ -175,13 +225,13 @@ class LLMClient:
             return cleaned
         except json.JSONDecodeError:
             print(f"警告: 清洗后仍然不是合法JSON。大模型原始返回:\n{raw_response}")
-            return "{}"
+            return None
 
 
 # ============================================================
 # 测试代码
 # ============================================================
-if __name__== "__main__":
+if __name__ == "__main__":
     import config
 
     if not config.LLM_API_KEY:
@@ -193,10 +243,17 @@ if __name__== "__main__":
             model_name=config.LLM_MODEL,
         )
 
-        # 测试基本对话
+        # 测试基本对话（非流式）
         print("--- 测试基本对话 ---")
         reply = client.chat("你好，请用一句话介绍什么是知识图谱")
         print("回复:", reply)
+
+        # 测试流式传输
+        print("\n--- 测试流式传输（打字机效果） ---")
+        print("回复: ", end="", flush=True)
+        for token in client.chat_stream("你好，请用一句话介绍什么是RAG技术"):
+            print(token, end="", flush=True)
+        print()  # 换行
 
         # 测试JSON输出
         print("\n--- 测试JSON输出 ---")
@@ -204,4 +261,7 @@ if __name__== "__main__":
             "请从这句话中提取实体：LangChain框架支持RAG技术的落地应用。",
             '请提取实体并输出JSON格式：{"entities": ["实体1", "实体2"]}'
         )
-        print("JSON回复:", json_reply)
+        if json_reply is None:
+            print("JSON输出测试失败：API返回异常或JSON解析失败")
+        else:
+            print("JSON回复:", json_reply)
