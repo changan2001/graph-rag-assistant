@@ -1,8 +1,11 @@
 """
-GraphRAG 核心问答链模块（最终版）
+GraphRAG 核心问答链模块（流式传输支持版）
 
 功能：
-    将向量检索和知识图谱检索融合，实现混合增强的智能问答
+    将向量检索和知识图谱检索融合，实现混合增强的智能问答。
+    提供两种问答模式：
+    - ask()：非流式，一次性返回完整回答（用于内部调用和测试）
+    - ask_stream()：流式传输，返回生成器，配合前端打字机效果
 """
 
 import json
@@ -22,7 +25,7 @@ class GraphRAGChain:
         self.kg = kg_store
 
     def _extract_entity_from_query(self, query: str) -> list[str]:
-        """从用户问题中提取实体词"""
+        """从用户问题中提取实体词（带完整防御）"""
         system_prompt = """你是一个专业的实体提取器。
 请从用户的提问中提取出核心的专有名词、技术概念或实体。
 请严格只输出纯JSON格式，不要用```包裹，不要有任何解释文字。
@@ -31,11 +34,30 @@ class GraphRAGChain:
 
         response_text = self.llm.chat_with_json_output(query, system_prompt)
 
+        # 防御：如果 API 故障返回了 None
+        if response_text is None:
+            print("  警告: 实体提取失败（API返回异常），将跳过图谱检索。")
+            return []
+
         try:
             data = json.loads(response_text)
+
+            # 防御性编程：确保是字典
+            if not isinstance(data, dict):
+                return []
+
             entities = data.get("entities", [])
-            print(f"  提取到实体: {entities}")
-            return entities
+
+            # 防御性编程：确保是列表
+            if not isinstance(entities, list):
+                return []
+
+            # 过滤掉非字符串的脏数据
+            valid_entities = [str(e) for e in entities if e]
+
+            print(f"  提取到实体: {valid_entities}")
+            return valid_entities
+
         except json.JSONDecodeError:
             print("  警告: 实体提取JSON解析失败")
             return []
@@ -56,16 +78,41 @@ class GraphRAGChain:
         unique_relations = list(set(all_relations))
         return "\n".join(unique_relations)
 
-    def ask(self, query: str, collection_name: str = "documents") -> dict:
+    def _build_system_prompt(self, vector_context: str, graph_context: str) -> str:
         """
-        回答用户问题
+        组装终极系统提示词（内部共用方法，避免 ask 和 ask_stream 重复代码）
+
+        参数:
+            vector_context: 格式化好的向量检索结果文本
+            graph_context: 格式化好的图谱检索结果文本
+
+        返回:
+            完整的系统提示词字符串
+        """
+        return f"""你是一个智能问答助手。
+请仔细阅读下方提供的【参考文档片段】和【参考知识图谱关系】，综合这些信息来回答用户的问题。
+要求：
+1. 回答要逻辑清晰、准确专业。
+2. 如果提供的参考信息中没有答案，请诚实地说明"抱歉，参考资料中未提及相关信息"，禁止胡编乱造。
+3. 可以在回答中适当提炼和总结。
+
+【参考文档片段】
+{vector_context if vector_context else "（无相关文档信息）"}
+
+【参考知识图谱关系】
+{graph_context if graph_context else "（无相关图谱信息）"}
+"""
+
+    def _do_retrieval(self, query: str, collection_name: str) -> dict:
+        """
+        执行检索阶段（内部共用方法）：向量检索 + 图谱检索
 
         参数:
             query: 用户的问题
             collection_name: 向量库中的集合名称
 
         返回:
-            包含回答和检索过程数据的字典
+            包含所有检索结果和组装好的提示词的字典
         """
         print(f"\n正在思考问题: {query}")
 
@@ -86,37 +133,77 @@ class GraphRAGChain:
         else:
             print("  未找到相关图谱关系")
 
-        # 3. 组装终极提示词
-        system_prompt = f"""你是一个智能问答助手。
-请仔细阅读下方提供的【参考文档片段】和【参考知识图谱关系】，综合这些信息来回答用户的问题。
-要求：
-1. 回答要逻辑清晰、准确专业。
-2. 如果提供的参考信息中没有答案，请诚实地说明"抱歉，参考资料中未提及相关信息"，禁止胡编乱造。
-3. 可以在回答中适当提炼和总结。
+        # 3. 组装提示词
+        system_prompt = self._build_system_prompt(vector_context, graph_context)
 
-【参考文档片段】
-{vector_context if vector_context else "（无相关文档信息）"}
+        return {
+            "system_prompt": system_prompt,
+            "vector_results": vector_results,
+            "graph_context": graph_context,
+            "entities": entities,
+        }
 
-【参考知识图谱关系】
-{graph_context if graph_context else "（无相关图谱信息）"}
-"""
+    def ask(self, query: str, collection_name: str = "documents") -> dict:
+        """
+        非流式问答（用于内部调用和测试）
 
-        # 4. 生成最终回答
+        参数:
+            query: 用户的问题
+            collection_name: 向量库中的集合名称
+
+        返回:
+            包含完整回答和检索过程数据的字典
+        """
+        retrieval = self._do_retrieval(query, collection_name)
+
+        # 4. 生成最终回答（非流式，一次性返回）
         print("正在生成最终回答...")
-        answer = self.llm.chat(query, system_prompt)
+        answer = self.llm.chat(query, retrieval["system_prompt"])
 
         return {
             "answer": answer,
-            "vector_context": vector_results,
-            "graph_context": graph_context,
-            "entities_extracted": entities,
+            "vector_context": retrieval["vector_results"],
+            "graph_context": retrieval["graph_context"],
+            "entities_extracted": retrieval["entities"],
         }
+
+    def ask_stream(self, query: str, collection_name: str = "documents") -> tuple:
+        """
+        流式问答（用于前端打字机效果）
+
+        检索阶段是同步的（前端用 spinner 显示"正在检索..."），
+        LLM 回答阶段是流式的（前端用 st.write_stream 显示打字机效果）。
+
+        参数:
+            query: 用户的问题
+            collection_name: 向量库中的集合名称
+
+        返回:
+            一个元组 (stream, context_data)：
+            - stream: 生成器，逐token产出LLM的回答文本
+            - context_data: 字典，包含检索过程的所有数据（实体、图谱路径、文档片段）
+        """
+        # 1-3步：同步执行检索和提示词组装
+        retrieval = self._do_retrieval(query, collection_name)
+
+        # 4. 创建流式生成器（此刻还没有真正发请求，只是创建了生成器对象）
+        print("正在流式生成最终回答...")
+        stream = self.llm.chat_stream(query, retrieval["system_prompt"])
+
+        # 组装上下文数据（供前端展示检索过程）
+        context_data = {
+            "vector_context": retrieval["vector_results"],
+            "graph_context": retrieval["graph_context"],
+            "entities_extracted": retrieval["entities"],
+        }
+
+        return stream, context_data
 
 
 # ============================================================
 # 测试代码
 # ============================================================
-if __name__== "__main__":
+if __name__ == "__main__":
     import config
 
     print("启动 GraphRAG 全链路测试...")
@@ -173,20 +260,30 @@ if __name__== "__main__":
             ]
         )
 
-        # 开始测试问答
+        # 测试非流式问答
+        print("\n" + "=" * 60)
+        print("【测试非流式问答】")
+        print("=" * 60)
         chain = GraphRAGChain(llm, vs, kg)
         question = "什么是GraphRAG？它和普通RAG有什么区别？"
 
         result = chain.ask(question, collection_name="test_collection")
 
-        print("\n" + "="* 60)
         print(f"提取到的实体词: {result['entities_extracted']}")
-        print(f"\n【查询到的图谱关系】:")
-        print(result["graph_context"] if result["graph_context"] else "  未找到关系")
-        print(f"\n【查询到的文档片段数量】: {len(result['vector_context'])}")
-        print(f"\n【最终回答】:\n")
-        print(result["answer"])
-        print("="* 60)
+        print(f"\n【图谱关系】:\n{result['graph_context'] if result['graph_context'] else '无'}")
+        print(f"\n【最终回答】:\n{result['answer']}")
+
+        # 测试流式问答
+        print("\n" + "=" * 60)
+        print("【测试流式问答（打字机效果）】")
+        print("=" * 60)
+        stream, context = chain.ask_stream(question, collection_name="test_collection")
+
+        print(f"提取到的实体词: {context['entities_extracted']}")
+        print(f"\n【流式回答】:")
+        for token in stream:
+            print(token, end="", flush=True)
+        print()
 
         # 清理测试数据
         vs.delete_collection("test_collection")
